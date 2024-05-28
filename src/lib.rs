@@ -80,7 +80,6 @@ impl Plugin for TpLimiter {
         names: PortNames::const_default(),
     }];
 
-
     const MIDI_INPUT: MidiConfig = MidiConfig::None;
     const MIDI_OUTPUT: MidiConfig = MidiConfig::None;
 
@@ -137,12 +136,17 @@ impl Plugin for TpLimiter {
 
 impl ClapPlugin for TpLimiter {
     const CLAP_ID: &'static str = "com.gentoid-dev.tp-limiter";
-    const CLAP_DESCRIPTION: Option<&'static str> = Some("One more True Peak Limiter (CLAP) plugin // WIP");
+    const CLAP_DESCRIPTION: Option<&'static str> =
+        Some("One more True Peak Limiter (CLAP) plugin // WIP");
     const CLAP_MANUAL_URL: Option<&'static str> = Some(Self::URL);
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
 
     // Don't forget to change these features
-    const CLAP_FEATURES: &'static [ClapFeature] = &[ClapFeature::AudioEffect, ClapFeature::Stereo];
+    const CLAP_FEATURES: &'static [ClapFeature] = &[
+        ClapFeature::AudioEffect,
+        ClapFeature::Stereo,
+        ClapFeature::Limiter,
+    ];
 }
 
 nih_export_clap!(TpLimiter);
