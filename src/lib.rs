@@ -1,12 +1,23 @@
 use nih_plug::prelude::*;
+use rubato::{FftFixedInOut, Resampler};
 use std::sync::Arc;
+use utils::prepare_resampler;
+
+mod utils;
 
 // This is a shortened version of the gain example with most comments removed, check out
 // https://github.com/robbert-vdh/nih-plug/blob/master/plugins/examples/gain/src/lib.rs to get
 // started
 
+const RESAMPLING_ERROR: &'static str = "Error during resampling";
+
 struct TpLimiter {
     params: Arc<TpLimiterParams>,
+    audio_io_layout: AudioIOLayout,
+    sample_rate: usize,
+    oversampling: usize,
+    upsampler: FftFixedInOut<f32>,
+    downsampler: FftFixedInOut<f32>,
 }
 
 #[derive(Params)]
@@ -21,8 +32,27 @@ struct TpLimiterParams {
 
 impl Default for TpLimiter {
     fn default() -> Self {
+        let sample_rate = 44100;
+        let oversampling = 16;
+        let high_sample_rate = sample_rate * oversampling;
+        let audio_io_layout = AudioIOLayout::default();
         Self {
             params: Arc::new(TpLimiterParams::default()),
+            audio_io_layout,
+            sample_rate,
+            oversampling,
+            upsampler: prepare_resampler(
+                sample_rate,
+                high_sample_rate,
+                &audio_io_layout,
+                "Couldn't create default upsampler",
+            ),
+            downsampler: prepare_resampler(
+                high_sample_rate,
+                sample_rate,
+                &audio_io_layout,
+                "Couldn't create default downsampler",
+            ),
         }
     }
 }
@@ -100,10 +130,27 @@ impl Plugin for TpLimiter {
 
     fn initialize(
         &mut self,
-        _audio_io_layout: &AudioIOLayout,
-        _buffer_config: &BufferConfig,
+        audio_io_layout: &AudioIOLayout,
+        buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {
+        self.audio_io_layout = audio_io_layout.clone();
+        self.sample_rate = buffer_config.sample_rate as usize;
+
+        let high_sample_rate = self.sample_rate * self.oversampling;
+        self.upsampler = prepare_resampler(
+            self.sample_rate,
+            high_sample_rate,
+            &self.audio_io_layout,
+            "Culdn't init upsampler",
+        );
+        self.downsampler = prepare_resampler(
+            high_sample_rate,
+            self.sample_rate,
+            &self.audio_io_layout,
+            "Culdn't init downsampler",
+        );
+
         // Resize buffers and perform other potentially expensive initialization operations here.
         // The `reset()` function is always called right after this function. You can remove this
         // function if you do not need it.
@@ -121,16 +168,25 @@ impl Plugin for TpLimiter {
         _aux: &mut AuxiliaryBuffers,
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        for channel_samples in buffer.iter_samples() {
-            // Smoothing is optionally built into the parameters themselves
-            let gain = self.params.gain.smoothed.next();
+        match self
+            .upsampler
+            .process(&buffer.as_slice_immutable(), None)
+            .and_then(|wave| self.downsampler.process(&wave, None))
+        {
+            Err(err) => {
+                nih_error!("{RESAMPLING_ERROR}: {err}");
+                ProcessStatus::Error(RESAMPLING_ERROR)
+            }
+            Ok(wave) => {
+                for (a, b) in buffer.as_slice().into_iter().zip(wave) {
+                    for (a, b) in a.iter_mut().zip(b) {
+                        *a = b;
+                    }
+                }
 
-            for sample in channel_samples {
-                *sample *= gain;
+                ProcessStatus::Normal
             }
         }
-
-        ProcessStatus::Normal
     }
 }
 
