@@ -82,21 +82,37 @@ impl IcedEditor for TpLimiterEditor {
                     .map(Message::ParamUpdate),
             )
             .push(
-                Text::new(format!("Min value: {}", self.values.min.load(atomic::Ordering::Relaxed)))
-                    .height(25.into())
-                    .width(Length::Fill)
-                    .horizontal_alignment(alignment::Horizontal::Center)
-                    .vertical_alignment(alignment::Vertical::Center),
+                Text::new(format!(
+                    "Min value: {}",
+                    self.values.min.load(atomic::Ordering::Relaxed)
+                ))
+                .height(25.into())
+                .width(Length::Fill)
+                .horizontal_alignment(alignment::Horizontal::Center)
+                .vertical_alignment(alignment::Vertical::Center),
             )
             .push(
-                Text::new(format!("Max value: {}", self.values.max.load(atomic::Ordering::Relaxed)))
-                    .height(25.into())
-                    .width(Length::Fill)
-                    .horizontal_alignment(alignment::Horizontal::Center)
-                    .vertical_alignment(alignment::Vertical::Center),
+                Text::new(format!(
+                    "Max value: {}",
+                    self.values.max.load(atomic::Ordering::Relaxed)
+                ))
+                .height(25.into())
+                .width(Length::Fill)
+                .horizontal_alignment(alignment::Horizontal::Center)
+                .vertical_alignment(alignment::Vertical::Center),
             )
             .push(
-                Text::new(format!("ABS value: {}", self.values.abs.load(atomic::Ordering::Relaxed)))
+                Text::new(format!(
+                    "ABS value: {}",
+                    self.values.abs.load(atomic::Ordering::Relaxed)
+                ))
+                .height(25.into())
+                .width(Length::Fill)
+                .horizontal_alignment(alignment::Horizontal::Center)
+                .vertical_alignment(alignment::Vertical::Center),
+            )
+            .push(
+                Text::new(format!("Release: {} ms", self.params.release_ms.value()))
                     .height(25.into())
                     .width(Length::Fill)
                     .horizontal_alignment(alignment::Horizontal::Center)

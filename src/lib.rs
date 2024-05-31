@@ -46,9 +46,11 @@ struct Values {
 struct TpLimiterParams {
     #[persist = "gui-state"]
     gui_state: Arc<IcedState>,
-    
+
     #[id = "gain"]
     pub gain: FloatParam,
+    #[id = "release"]
+    pub release_ms: FloatParam,
 }
 
 impl Default for TpLimiter {
@@ -85,7 +87,7 @@ impl Default for TpLimiter {
             c2r_plan,
             complex_fft_buffer,
 
-            values: Arc::new(Values::default())
+            values: Arc::new(Values::default()),
         }
     }
 }
@@ -117,6 +119,17 @@ impl Default for TpLimiterParams {
             // `.with_step_size(0.1)` function to get internal rounding.
             .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            release_ms: FloatParam::new(
+                "Release",
+                200.0,
+                FloatRange::Skewed {
+                    min: 0.1,
+                    max: 10000.0,
+                    factor: FloatRange::skew_factor(-2.0),
+                },
+            )
+            .with_step_size(0.1)
+            .with_unit(" ms"),
         }
     }
 }
@@ -163,7 +176,11 @@ impl Plugin for TpLimiter {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        gui::create(self.params.gui_state.clone(), self.params.clone(), self.values.clone())
+        gui::create(
+            self.params.gui_state.clone(),
+            self.params.clone(),
+            self.values.clone(),
+        )
     }
 
     fn initialize(
@@ -209,17 +226,25 @@ impl Plugin for TpLimiter {
                 let mut abs: f32 = 0.0;
                 // As per the convolution theorem we can simply multiply these two buffers. We'll
                 // also apply the gain compensation at this point.
-                for fft_bin in self.complex_fft_buffer.iter_mut()
-                {
+                for fft_bin in self.complex_fft_buffer.iter_mut() {
                     *fft_bin *= GAIN_COMPENSATION;
                     min = min.min(fft_bin.re);
                     max = max.max(fft_bin.re);
                     abs = abs.max(fft_bin.abs());
                 }
 
-                self.values.min.store(self.values.min.load(atomic::Ordering::Relaxed).min(min), atomic::Ordering::Relaxed);
-                self.values.max.store(self.values.max.load(atomic::Ordering::Relaxed).max(max), atomic::Ordering::Relaxed);
-                self.values.abs.store(self.values.abs.load(atomic::Ordering::Relaxed).max(abs), atomic::Ordering::Relaxed);
+                self.values.min.store(
+                    self.values.min.load(atomic::Ordering::Relaxed).min(min),
+                    atomic::Ordering::Relaxed,
+                );
+                self.values.max.store(
+                    self.values.max.load(atomic::Ordering::Relaxed).max(max),
+                    atomic::Ordering::Relaxed,
+                );
+                self.values.abs.store(
+                    self.values.abs.load(atomic::Ordering::Relaxed).max(abs),
+                    atomic::Ordering::Relaxed,
+                );
 
                 // Inverse FFT back into the scratch buffer. This will be added to a ring buffer
                 // which gets written back to the host at a one block delay.
