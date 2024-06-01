@@ -1,10 +1,12 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use nih_plug::{prelude::*, util::StftHelper};
 use nih_plug_iced::IcedState;
 use realfft::{
-    num_complex::{Complex32, ComplexFloat},
-    ComplexToReal, RealFftPlanner, RealToComplex,
+    ComplexToReal,
+    num_complex::{Complex32, ComplexFloat}, RealFftPlanner, RealToComplex,
 };
-use std::sync::{atomic, Arc};
 
 mod gui;
 
@@ -33,13 +35,20 @@ struct TpLimiter {
     complex_fft_buffer: Vec<Complex32>,
 
     values: Arc<Values>,
+    envelope: Smoother<f32>,
+    release_changed: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
 struct Values {
-    min: AtomicF32,
-    max: AtomicF32,
     abs: AtomicF32,
+}
+
+#[derive(Enum, PartialEq)]
+enum OversamplingOptions {
+    X1,
+    X4,
+    X16,
 }
 
 #[derive(Params)]
@@ -51,6 +60,8 @@ struct TpLimiterParams {
     pub gain: FloatParam,
     #[id = "release"]
     pub release_ms: FloatParam,
+    #[id = "oversampling"]
+    pub oversampling_factor: EnumParam<OversamplingOptions>,
 }
 
 impl Default for TpLimiter {
@@ -75,11 +86,22 @@ impl Default for TpLimiter {
         r2c_plan
             .process_with_scratch(&mut real_fft_buffer, &mut complex_fft_buffer, &mut [])
             .unwrap();
+
+        let default_release: f32 = 200.0;
+        let envelope = Smoother::new(SmoothingStyle::Exponential(default_release));
+        envelope.reset(0.0);
+        envelope.set_target(44100.0, 0.0);
+
+        let release_changed: Arc<AtomicBool> = Arc::new(false.into());
+        let release_changed_clone = release_changed.clone();
+        let on_release_changed =
+            Arc::new(move |_| release_changed_clone.store(true, Ordering::SeqCst));
+
         Self {
-            params: Arc::new(TpLimiterParams::default()),
+            params: Arc::new(TpLimiterParams::new(default_release, on_release_changed)),
 
             // We'll process the input in `WINDOW_SIZE` chunks, but our FFT window is slightly
-            // larger to account for time domain aliasing so we'll need to add some padding ot each
+            // larger to account for time domain aliasing, so we'll need to add some padding on each
             // block.
             stft: StftHelper::new(2, WINDOW_SIZE, FFT_WINDOW_SIZE - WINDOW_SIZE),
 
@@ -87,13 +109,15 @@ impl Default for TpLimiter {
             c2r_plan,
             complex_fft_buffer,
 
-            values: Arc::new(Values::default()),
+            values: Arc::new(Values { abs: 0.0.into() }),
+            envelope,
+            release_changed,
         }
     }
 }
 
-impl Default for TpLimiterParams {
-    fn default() -> Self {
+impl TpLimiterParams {
+    fn new(default_release: f32, on_changed: Arc<dyn Fn(f32) + Send + Sync>) -> Self {
         Self {
             gui_state: gui::default_state(),
             // This gain is stored as linear gain. NIH-plug comes with useful conversion functions
@@ -121,7 +145,7 @@ impl Default for TpLimiterParams {
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
             release_ms: FloatParam::new(
                 "Release",
-                200.0,
+                default_release,
                 FloatRange::Skewed {
                     min: 0.1,
                     max: 10000.0,
@@ -129,7 +153,9 @@ impl Default for TpLimiterParams {
                 },
             )
             .with_step_size(0.1)
-            .with_unit(" ms"),
+            .with_unit(" ms")
+            .with_callback(on_changed),
+            oversampling_factor: EnumParam::new("Oversampling", OversamplingOptions::X1),
         }
     }
 }
@@ -186,13 +212,14 @@ impl Plugin for TpLimiter {
     fn initialize(
         &mut self,
         _audio_io_layout: &AudioIOLayout,
-        _buffer_config: &BufferConfig,
+        buffer_config: &BufferConfig,
         context: &mut impl InitContext<Self>,
     ) -> bool {
         // The plugin's latency consists of the block size from the overlap-add procedure and half
         // of the filter kernel's size (since we're using a linear phase/symmetrical convolution
         // kernel)
         context.set_latency_samples(self.stft.latency_samples() + (FILTER_WINDOW_SIZE as u32 / 2));
+        self.envelope.set_target(buffer_config.sample_rate, 0.0);
         true
     }
 
@@ -210,41 +237,47 @@ impl Plugin for TpLimiter {
         &mut self,
         buffer: &mut Buffer,
         _aux: &mut AuxiliaryBuffers,
-        _context: &mut impl ProcessContext<Self>,
+        context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
+        if self.release_changed.load(Ordering::SeqCst) {
+            let prev_value = self.envelope.previous_value();
+
+            self.envelope =
+                Smoother::new(SmoothingStyle::Exponential(self.params.release_ms.value()));
+
+            self.envelope.reset(prev_value);
+            self.envelope
+                .set_target(context.transport().sample_rate, 0.0);
+        }
+
         self.stft
             .process_overlap_add(buffer, 1, |_channel_idx, real_fft_buffer| {
-                // Forward FFT, `real_fft_buffer` already is already padded with zeroes, and the
+                // Forward FFT, `real_fft_buffer` is already padded with zeroes, and the
                 // padding from the last iteration will have already been added back to the start of
                 // the buffer
                 self.r2c_plan
                     .process_with_scratch(real_fft_buffer, &mut self.complex_fft_buffer, &mut [])
                     .unwrap();
 
-                let mut min: f32 = 0.0;
-                let mut max: f32 = 0.0;
+                // TODO: where's oversampling going to be introduced?
+
+                let mut envelope_value: f32 = 0.0;
                 let mut abs: f32 = 0.0;
                 // As per the convolution theorem we can simply multiply these two buffers. We'll
                 // also apply the gain compensation at this point.
                 for fft_bin in self.complex_fft_buffer.iter_mut() {
                     *fft_bin *= GAIN_COMPENSATION;
-                    min = min.min(fft_bin.re);
-                    max = max.max(fft_bin.re);
                     abs = abs.max(fft_bin.abs());
+                    envelope_value = self.envelope.next();
                 }
 
-                self.values.min.store(
-                    self.values.min.load(atomic::Ordering::Relaxed).min(min),
-                    atomic::Ordering::Relaxed,
-                );
-                self.values.max.store(
-                    self.values.max.load(atomic::Ordering::Relaxed).max(max),
-                    atomic::Ordering::Relaxed,
-                );
-                self.values.abs.store(
-                    self.values.abs.load(atomic::Ordering::Relaxed).max(abs),
-                    atomic::Ordering::Relaxed,
-                );
+                if abs > envelope_value {
+                    self.envelope.reset(abs);
+                }
+
+                self.values
+                    .abs
+                    .store(self.envelope.previous_value(), Ordering::Relaxed);
 
                 // Inverse FFT back into the scratch buffer. This will be added to a ring buffer
                 // which gets written back to the host at a one block delay.

@@ -1,4 +1,4 @@
-use std::sync::{atomic, Arc};
+use std::sync::{Arc, atomic};
 
 use nih_plug::{context::gui::GuiContext, editor::Editor};
 use nih_plug_iced::*;
@@ -83,27 +83,7 @@ impl IcedEditor for TpLimiterEditor {
             )
             .push(
                 Text::new(format!(
-                    "Min value: {}",
-                    self.values.min.load(atomic::Ordering::Relaxed)
-                ))
-                .height(25.into())
-                .width(Length::Fill)
-                .horizontal_alignment(alignment::Horizontal::Center)
-                .vertical_alignment(alignment::Vertical::Center),
-            )
-            .push(
-                Text::new(format!(
-                    "Max value: {}",
-                    self.values.max.load(atomic::Ordering::Relaxed)
-                ))
-                .height(25.into())
-                .width(Length::Fill)
-                .horizontal_alignment(alignment::Horizontal::Center)
-                .vertical_alignment(alignment::Vertical::Center),
-            )
-            .push(
-                Text::new(format!(
-                    "ABS value: {}",
+                    "ABS value: {:.3}",
                     self.values.abs.load(atomic::Ordering::Relaxed)
                 ))
                 .height(25.into())
@@ -112,7 +92,7 @@ impl IcedEditor for TpLimiterEditor {
                 .vertical_alignment(alignment::Vertical::Center),
             )
             .push(
-                Text::new(format!("Release: {} ms", self.params.release_ms.value()))
+                Text::new(format!("Release: {:.2} ms", self.params.release_ms.value()))
                     .height(25.into())
                     .width(Length::Fill)
                     .horizontal_alignment(alignment::Horizontal::Center)
