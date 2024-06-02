@@ -255,8 +255,8 @@ impl Plugin for TpLimiter {
 
         let mut envelope_value: f32;
 
-        for samples in buffer.as_slice_immutable() {
-            for sample in samples.iter() {
+        for samples in buffer.as_slice() {
+            for sample in samples.iter_mut() {
                 let abs = 1.0f32.max(sample.abs()); // util::db_to_gain(0.0)
                 envelope_value = self.envelope_follower.next();
 
@@ -265,6 +265,8 @@ impl Plugin for TpLimiter {
                     self.envelope_follower
                         .set_target(context.transport().sample_rate, util::db_to_gain(0.0));
                 }
+
+                *sample /= envelope_value;
             }
 
             // NOTE: calculating a single channel only
