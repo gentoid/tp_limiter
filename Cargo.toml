@@ -19,6 +19,7 @@ crate-type = ["cdylib"]
 nih_plug_iced = { git = "https://github.com/robbert-vdh/nih-plug.git" }
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", default-features = false, features = ["assert_process_allocs"] }
 realfft = "3.3"
+rubato = "0.15.0"
 
 [profile.release]
 lto = "thin"
