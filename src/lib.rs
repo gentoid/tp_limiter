@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use nih_plug::{prelude::*, util::StftHelper};
 use nih_plug_iced::IcedState;
@@ -39,7 +39,6 @@ struct TpLimiter {
 #[derive(Default)]
 struct Values {
     abs: AtomicF32,
-    blocks: AtomicU32,
 }
 
 #[derive(Enum, PartialEq)]
@@ -107,10 +106,7 @@ impl Default for TpLimiter {
             c2r_plan,
             complex_fft_buffer,
 
-            values: Arc::new(Values {
-                abs: 0.0.into(),
-                blocks: 0.into(),
-            }),
+            values: Arc::new(Values { abs: 0.0.into() }),
             envelope,
             release_changed,
         }
@@ -278,11 +274,6 @@ impl Plugin for TpLimiter {
         self.values
             .abs
             .store(self.envelope.previous_value(), Ordering::Relaxed);
-
-        self.values.blocks.store(
-            self.values.blocks.load(Ordering::SeqCst) + 1,
-            Ordering::SeqCst,
-        );
 
         self.stft
             .process_overlap_add(buffer, 1, |_channel_idx, real_fft_buffer| {

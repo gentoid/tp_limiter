@@ -98,16 +98,6 @@ impl IcedEditor for TpLimiterEditor {
                     .horizontal_alignment(alignment::Horizontal::Center)
                     .vertical_alignment(alignment::Vertical::Center),
             )
-            .push(
-                Text::new(format!(
-                    "ABS value: {:07}",
-                    self.values.blocks.load(atomic::Ordering::Relaxed)
-                ))
-                .height(25.into())
-                .width(Length::Fill)
-                .horizontal_alignment(alignment::Horizontal::Center)
-                .vertical_alignment(alignment::Vertical::Center),
-            )
             .into()
     }
 }
