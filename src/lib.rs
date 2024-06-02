@@ -252,6 +252,10 @@ impl Plugin for TpLimiter {
                 .set_target(context.transport().sample_rate, 0.0);
         }
 
+        if buffer.samples() == 0 {
+            return ProcessStatus::Normal;
+        }
+
         let mut envelope_value: f32;
         let mut abs: f32 = 0.0;
 
