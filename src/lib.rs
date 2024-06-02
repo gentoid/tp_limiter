@@ -1,12 +1,9 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use nih_plug::{prelude::*, util::StftHelper};
 use nih_plug_iced::IcedState;
-use realfft::{
-    ComplexToReal,
-    num_complex::{Complex32, ComplexFloat}, RealFftPlanner, RealToComplex,
-};
+use realfft::{ComplexToReal, num_complex::Complex32, RealFftPlanner, RealToComplex};
 
 mod gui;
 
@@ -42,6 +39,7 @@ struct TpLimiter {
 #[derive(Default)]
 struct Values {
     abs: AtomicF32,
+    blocks: AtomicU32,
 }
 
 #[derive(Enum, PartialEq)]
@@ -92,7 +90,7 @@ impl Default for TpLimiter {
         envelope.reset(0.0);
         envelope.set_target(44100.0, 0.0);
 
-        let release_changed: Arc<AtomicBool> = Arc::new(false.into());
+        let release_changed: Arc<AtomicBool> = Arc::new(true.into());
         let release_changed_clone = release_changed.clone();
         let on_release_changed =
             Arc::new(move |_| release_changed_clone.store(true, Ordering::SeqCst));
@@ -109,7 +107,10 @@ impl Default for TpLimiter {
             c2r_plan,
             complex_fft_buffer,
 
-            values: Arc::new(Values { abs: 0.0.into() }),
+            values: Arc::new(Values {
+                abs: 0.0.into(),
+                blocks: 0.into(),
+            }),
             envelope,
             release_changed,
         }
@@ -148,7 +149,7 @@ impl TpLimiterParams {
                 default_release,
                 FloatRange::Skewed {
                     min: 0.1,
-                    max: 10000.0,
+                    max: 100000.0,
                     factor: FloatRange::skew_factor(-2.0),
                 },
             )
@@ -240,6 +241,7 @@ impl Plugin for TpLimiter {
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         if self.release_changed.load(Ordering::SeqCst) {
+            self.release_changed.store(false, Ordering::SeqCst);
             let prev_value = self.envelope.previous_value();
 
             self.envelope =
@@ -249,6 +251,34 @@ impl Plugin for TpLimiter {
             self.envelope
                 .set_target(context.transport().sample_rate, 0.0);
         }
+
+        let mut envelope_value: f32;
+        let mut abs: f32 = 0.0;
+
+        for samples in buffer.as_slice_immutable() {
+            for sample in samples.iter() {
+                abs = abs.max(sample.abs());
+                envelope_value = self.envelope.next();
+
+                if abs > envelope_value {
+                    self.envelope.reset(abs);
+                    self.envelope
+                        .set_target(context.transport().sample_rate, 0.0);
+                }
+            }
+
+            // NOTE: calculating a single channel only
+            break;
+        }
+
+        self.values
+            .abs
+            .store(self.envelope.previous_value(), Ordering::Relaxed);
+
+        self.values.blocks.store(
+            self.values.blocks.load(Ordering::SeqCst) + 1,
+            Ordering::SeqCst,
+        );
 
         self.stft
             .process_overlap_add(buffer, 1, |_channel_idx, real_fft_buffer| {
@@ -261,23 +291,11 @@ impl Plugin for TpLimiter {
 
                 // TODO: where's oversampling going to be introduced?
 
-                let mut envelope_value: f32 = 0.0;
-                let mut abs: f32 = 0.0;
                 // As per the convolution theorem we can simply multiply these two buffers. We'll
                 // also apply the gain compensation at this point.
                 for fft_bin in self.complex_fft_buffer.iter_mut() {
                     *fft_bin *= GAIN_COMPENSATION;
-                    abs = abs.max(fft_bin.abs());
-                    envelope_value = self.envelope.next();
                 }
-
-                if abs > envelope_value {
-                    self.envelope.reset(abs);
-                }
-
-                self.values
-                    .abs
-                    .store(self.envelope.previous_value(), Ordering::Relaxed);
 
                 // Inverse FFT back into the scratch buffer. This will be added to a ring buffer
                 // which gets written back to the host at a one block delay.
