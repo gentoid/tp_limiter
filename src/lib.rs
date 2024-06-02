@@ -253,24 +253,38 @@ impl Plugin for TpLimiter {
             return ProcessStatus::Normal;
         }
 
-        let mut envelope_value: f32;
+        let samples = buffer.samples();
+        let channels = buffer.channels();
+        let slice = buffer.as_slice();
 
-        for samples in buffer.as_slice() {
-            for sample in samples.iter_mut() {
-                let abs = 1.0f32.max(sample.abs()); // util::db_to_gain(0.0)
-                envelope_value = self.envelope_follower.next();
+        let mut sample_id = 0;
+        while sample_id < samples {
+            let mut abs: f32 = 1.0; // util::db_to_gain(0.0)
+            let envelope_value = self.envelope_follower.next();
 
-                if abs > envelope_value {
-                    self.envelope_follower.reset(abs);
-                    self.envelope_follower
-                        .set_target(context.transport().sample_rate, util::db_to_gain(0.0));
-                }
+            let mut channel_id = 0;
+            while channel_id < channels {
+                let sample = slice[channel_id][sample_id];
+                abs = abs.max(sample.abs());
 
-                *sample /= envelope_value;
+                channel_id += 1;
             }
 
-            // NOTE: calculating a single channel only
-            break;
+            if abs > envelope_value {
+                self.envelope_follower.reset(abs);
+                self.envelope_follower
+                    .set_target(context.transport().sample_rate, util::db_to_gain(0.0));
+            }
+
+            let mut channel_id = 0;
+            while channel_id < channels {
+                let sample = slice[channel_id][sample_id];
+                (*slice)[channel_id][sample_id] = sample / envelope_value;
+
+                channel_id += 1;
+            }
+
+            sample_id += 1;
         }
 
         self.values
