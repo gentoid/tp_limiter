@@ -86,8 +86,8 @@ impl Default for TpLimiter {
 
         let default_release: f32 = 200.0;
         let envelope_follower = Smoother::new(SmoothingStyle::Exponential(default_release));
-        envelope_follower.reset(0.0);
-        envelope_follower.set_target(44100.0, 0.0);
+        envelope_follower.reset(util::db_to_gain(0.0));
+        envelope_follower.set_target(44100.0, util::db_to_gain(0.0));
 
         let release_changed: Arc<AtomicBool> = Arc::new(true.into());
         let release_changed_clone = release_changed.clone();
@@ -217,7 +217,7 @@ impl Plugin for TpLimiter {
         // kernel)
         context.set_latency_samples(self.stft.latency_samples() + (FILTER_WINDOW_SIZE as u32 / 2));
         self.envelope_follower
-            .set_target(buffer_config.sample_rate, 0.0);
+            .set_target(buffer_config.sample_rate, util::db_to_gain(0.0));
         true
     }
 
@@ -246,7 +246,7 @@ impl Plugin for TpLimiter {
 
             self.envelope_follower.reset(prev_value);
             self.envelope_follower
-                .set_target(context.transport().sample_rate, 0.0);
+                .set_target(context.transport().sample_rate, util::db_to_gain(0.0));
         }
 
         if buffer.samples() == 0 {
@@ -254,17 +254,16 @@ impl Plugin for TpLimiter {
         }
 
         let mut envelope_value: f32;
-        let mut abs: f32 = 0.0;
 
         for samples in buffer.as_slice_immutable() {
             for sample in samples.iter() {
-                abs = abs.max(sample.abs());
+                let abs = 1.0f32.max(sample.abs()); // util::db_to_gain(0.0)
                 envelope_value = self.envelope_follower.next();
 
                 if abs > envelope_value {
                     self.envelope_follower.reset(abs);
                     self.envelope_follower
-                        .set_target(context.transport().sample_rate, 0.0);
+                        .set_target(context.transport().sample_rate, util::db_to_gain(0.0));
                 }
             }
 

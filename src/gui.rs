@@ -1,6 +1,7 @@
 use std::sync::{Arc, atomic};
+use std::sync::atomic::Ordering;
 
-use nih_plug::{context::gui::GuiContext, editor::Editor};
+use nih_plug::{context::gui::GuiContext, editor::Editor, util};
 use nih_plug_iced::*;
 
 use crate::{TpLimiterParams, Values};
@@ -97,6 +98,16 @@ impl IcedEditor for TpLimiterEditor {
                     .width(Length::Fill)
                     .horizontal_alignment(alignment::Horizontal::Center)
                     .vertical_alignment(alignment::Vertical::Center),
+            )
+            .push(
+                Text::new(format!(
+                    "Gain reduction: {:.1} dB",
+                    -1.0 * util::gain_to_db(self.values.abs.load(Ordering::Relaxed))
+                ))
+                .height(25.into())
+                .width(Length::Fill)
+                .horizontal_alignment(alignment::Horizontal::Center)
+                .vertical_alignment(alignment::Vertical::Center),
             )
             .into()
     }
