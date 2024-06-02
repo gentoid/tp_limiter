@@ -32,7 +32,7 @@ struct TpLimiter {
     complex_fft_buffer: Vec<Complex32>,
 
     values: Arc<Values>,
-    envelope: Smoother<f32>,
+    envelope_follower: Smoother<f32>,
     release_changed: Arc<AtomicBool>,
 }
 
@@ -85,9 +85,9 @@ impl Default for TpLimiter {
             .unwrap();
 
         let default_release: f32 = 200.0;
-        let envelope = Smoother::new(SmoothingStyle::Exponential(default_release));
-        envelope.reset(0.0);
-        envelope.set_target(44100.0, 0.0);
+        let envelope_follower = Smoother::new(SmoothingStyle::Exponential(default_release));
+        envelope_follower.reset(0.0);
+        envelope_follower.set_target(44100.0, 0.0);
 
         let release_changed: Arc<AtomicBool> = Arc::new(true.into());
         let release_changed_clone = release_changed.clone();
@@ -107,7 +107,7 @@ impl Default for TpLimiter {
             complex_fft_buffer,
 
             values: Arc::new(Values { abs: 0.0.into() }),
-            envelope,
+            envelope_follower,
             release_changed,
         }
     }
@@ -216,7 +216,8 @@ impl Plugin for TpLimiter {
         // of the filter kernel's size (since we're using a linear phase/symmetrical convolution
         // kernel)
         context.set_latency_samples(self.stft.latency_samples() + (FILTER_WINDOW_SIZE as u32 / 2));
-        self.envelope.set_target(buffer_config.sample_rate, 0.0);
+        self.envelope_follower
+            .set_target(buffer_config.sample_rate, 0.0);
         true
     }
 
@@ -238,13 +239,13 @@ impl Plugin for TpLimiter {
     ) -> ProcessStatus {
         if self.release_changed.load(Ordering::SeqCst) {
             self.release_changed.store(false, Ordering::SeqCst);
-            let prev_value = self.envelope.previous_value();
+            let prev_value = self.envelope_follower.previous_value();
 
-            self.envelope =
+            self.envelope_follower =
                 Smoother::new(SmoothingStyle::Exponential(self.params.release_ms.value()));
 
-            self.envelope.reset(prev_value);
-            self.envelope
+            self.envelope_follower.reset(prev_value);
+            self.envelope_follower
                 .set_target(context.transport().sample_rate, 0.0);
         }
 
@@ -258,11 +259,11 @@ impl Plugin for TpLimiter {
         for samples in buffer.as_slice_immutable() {
             for sample in samples.iter() {
                 abs = abs.max(sample.abs());
-                envelope_value = self.envelope.next();
+                envelope_value = self.envelope_follower.next();
 
                 if abs > envelope_value {
-                    self.envelope.reset(abs);
-                    self.envelope
+                    self.envelope_follower.reset(abs);
+                    self.envelope_follower
                         .set_target(context.transport().sample_rate, 0.0);
                 }
             }
@@ -273,7 +274,7 @@ impl Plugin for TpLimiter {
 
         self.values
             .abs
-            .store(self.envelope.previous_value(), Ordering::Relaxed);
+            .store(self.envelope_follower.previous_value(), Ordering::Relaxed);
 
         self.stft
             .process_overlap_add(buffer, 1, |_channel_idx, real_fft_buffer| {
