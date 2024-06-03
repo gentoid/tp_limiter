@@ -4,8 +4,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use nih_plug::{prelude::*, util::StftHelper};
 use nih_plug_iced::IcedState;
 use realfft::{ComplexToReal, num_complex::Complex32, RealFftPlanner, RealToComplex};
+use realfft::num_traits::Zero;
+use rubato::{FftFixedInOut, Resampler};
+
+use crate::utils::prepare_resampler;
 
 mod gui;
+mod utils;
 
 /// The size of the windows we'll process at a time.
 const WINDOW_SIZE: usize = 64;
@@ -18,11 +23,17 @@ const FFT_WINDOW_SIZE: usize = WINDOW_SIZE + FILTER_WINDOW_SIZE - 1;
 /// The gain compensation we need to apply for the STFT process.
 const GAIN_COMPENSATION: f32 = 1.0 / FFT_WINDOW_SIZE as f32;
 
+const RESAMPLING_INI_ERROR: &'static str = "Error during init resampling";
+const RESAMPLING_ERROR: &'static str = "Error during resampling";
+
 struct TpLimiter {
     params: Arc<TpLimiterParams>,
 
     /// An adapter that performs most of the overlap-add algorithm for us.
     stft: StftHelper,
+
+    upsampler: Option<FftFixedInOut<f32>>,
+    downsampler: Option<FftFixedInOut<f32>>,
 
     /// The algorithm for the FFT operation.
     r2c_plan: Arc<dyn RealToComplex<f32>>,
@@ -34,6 +45,7 @@ struct TpLimiter {
     values: Arc<Values>,
     envelope_follower: Smoother<f32>,
     release_changed: Arc<AtomicBool>,
+    oversampling_changed: Arc<AtomicBool>,
 }
 
 #[derive(Default)]
@@ -94,13 +106,25 @@ impl Default for TpLimiter {
         let on_release_changed =
             Arc::new(move |_| release_changed_clone.store(true, Ordering::SeqCst));
 
+        let oversampling_changed: Arc<AtomicBool> = Arc::new(true.into());
+        let oversampling_changed_clone = oversampling_changed.clone();
+        let on_oversampling_changed =
+            Arc::new(move |_| oversampling_changed_clone.store(true, Ordering::SeqCst));
+
         Self {
-            params: Arc::new(TpLimiterParams::new(default_release, on_release_changed)),
+            params: Arc::new(TpLimiterParams::new(
+                default_release,
+                on_release_changed,
+                on_oversampling_changed,
+            )),
 
             // We'll process the input in `WINDOW_SIZE` chunks, but our FFT window is slightly
             // larger to account for time domain aliasing, so we'll need to add some padding on each
             // block.
             stft: StftHelper::new(2, WINDOW_SIZE, FFT_WINDOW_SIZE - WINDOW_SIZE),
+
+            upsampler: None,
+            downsampler: None,
 
             r2c_plan,
             c2r_plan,
@@ -109,12 +133,17 @@ impl Default for TpLimiter {
             values: Arc::new(Values { abs: 0.0.into() }),
             envelope_follower,
             release_changed,
+            oversampling_changed,
         }
     }
 }
 
 impl TpLimiterParams {
-    fn new(default_release: f32, on_changed: Arc<dyn Fn(f32) + Send + Sync>) -> Self {
+    fn new(
+        default_release: f32,
+        on_release_changed: Arc<dyn Fn(f32) + Send + Sync>,
+        on_oversampling_changed: Arc<dyn Fn(OversamplingOptions) + Send + Sync>,
+    ) -> Self {
         Self {
             gui_state: gui::default_state(),
             // This gain is stored as linear gain. NIH-plug comes with useful conversion functions
@@ -151,8 +180,9 @@ impl TpLimiterParams {
             )
             .with_step_size(0.1)
             .with_unit(" ms")
-            .with_callback(on_changed),
-            oversampling_factor: EnumParam::new("Oversampling", OversamplingOptions::X1),
+            .with_callback(on_release_changed),
+            oversampling_factor: EnumParam::new("Oversampling", OversamplingOptions::X1)
+                .with_callback(on_oversampling_changed),
         }
     }
 }
@@ -249,43 +279,103 @@ impl Plugin for TpLimiter {
                 .set_target(context.transport().sample_rate, util::db_to_gain(0.0));
         }
 
+        if self.oversampling_changed.load(Ordering::SeqCst) {
+            self.oversampling_changed.store(false, Ordering::SeqCst);
+
+            let oversampling = match self.params.oversampling_factor.value() {
+                OversamplingOptions::X1 => 1,
+                OversamplingOptions::X4 => 4,
+                OversamplingOptions::X16 => 16,
+            };
+
+            if oversampling == 1 {
+                self.upsampler = None;
+                self.downsampler = None;
+            } else {
+                let sample_rate = context.transport().sample_rate as usize;
+                let up_sample_rate = sample_rate * oversampling;
+                let num_of_channels = buffer.channels();
+
+                self.upsampler = match prepare_resampler(
+                    sample_rate,
+                    up_sample_rate,
+                    num_of_channels,
+                    "Couldn't create upsampler",
+                ) {
+                    Ok(resampler) => Some(resampler),
+                    Err(_) => return ProcessStatus::Error(RESAMPLING_INI_ERROR),
+                };
+
+                self.downsampler = match prepare_resampler(
+                    up_sample_rate,
+                    sample_rate,
+                    num_of_channels,
+                    "Couldn't create downsampler",
+                ) {
+                    Ok(resampler) => Some(resampler),
+                    Err(_) => return ProcessStatus::Error(RESAMPLING_INI_ERROR),
+                };
+            }
+        }
+
         if buffer.samples() == 0 {
             return ProcessStatus::Normal;
         }
 
-        let samples = buffer.samples();
-        let channels = buffer.channels();
-        let slice = buffer.as_slice();
+        if let (Some(upsampler), Some(downsampler)) = (&mut self.upsampler, &mut self.downsampler) {
+            // TODO: make the smoother oversampling aware
+            let mut upsampled = match upsampler.process(&buffer.as_slice_immutable(), None) {
+                Ok(wave) => wave,
+                Err(_) => return ProcessStatus::Error(RESAMPLING_ERROR),
+            };
 
-        let mut sample_id = 0;
-        while sample_id < samples {
-            let mut abs: f32 = 1.0; // util::db_to_gain(0.0)
-            let envelope_value = self.envelope_follower.next();
-
-            let mut channel_id = 0;
-            while channel_id < channels {
-                let sample = slice[channel_id][sample_id];
-                abs = abs.max(sample.abs());
-
-                channel_id += 1;
+            if upsampled.len().is_zero() {
+                return ProcessStatus::Error(RESAMPLING_ERROR);
             }
 
-            if abs > envelope_value {
-                self.envelope_follower.reset(abs);
-                self.envelope_follower
-                    .set_target(context.transport().sample_rate, util::db_to_gain(0.0));
+            let samples = upsampled[0].len();
+            let channels = upsampled.len();
+
+            let mut sample_id = 0;
+            while sample_id < samples {
+                let mut abs: f32 = 1.0; // util::db_to_gain(0.0)
+                let envelope_value = self.envelope_follower.next();
+
+                let mut channel_id = 0;
+                while channel_id < channels {
+                    let sample = upsampled[channel_id][sample_id];
+                    abs = abs.max(sample.abs());
+
+                    channel_id += 1;
+                }
+
+                if abs > envelope_value {
+                    self.envelope_follower.reset(abs);
+                    self.envelope_follower
+                        .set_target(context.transport().sample_rate, util::db_to_gain(0.0));
+                }
+
+                let mut channel_id = 0;
+                while channel_id < channels {
+                    let sample = upsampled[channel_id][sample_id];
+                    upsampled[channel_id][sample_id] = sample / envelope_value;
+
+                    channel_id += 1;
+                }
+
+                sample_id += 1;
             }
 
-            let mut channel_id = 0;
-            while channel_id < channels {
-                let sample = slice[channel_id][sample_id];
-                (*slice)[channel_id][sample_id] = sample / envelope_value;
+            let processed = match downsampler.process(&upsampled, None) {
+                Ok(wave) => wave,
+                Err(_) => return ProcessStatus::Error(RESAMPLING_ERROR),
+            };
 
-                channel_id += 1;
+            for (a, b) in buffer.as_slice().into_iter().zip(&processed) {
+                for (a, b) in a.iter_mut().zip(b) {
+                    *a = *b;
+                }
             }
-
-            sample_id += 1;
-        }
 
         self.values
             .abs
